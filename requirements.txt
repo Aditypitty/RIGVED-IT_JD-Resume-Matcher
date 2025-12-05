@@ -4,3 +4,4 @@ python-docx
 pandas
 scikit-learn
 rapidfuzz
+plotly
