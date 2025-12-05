@@ -1,23 +1,17 @@
 # streamlit_app.py
 import streamlit as st
-import io, os, re, tempfile
+import io, os, re
 from pathlib import Path
 import pandas as pd
 import numpy as np
-
-# text extraction
 import pdfplumber
 import docx
-
-# keyword extraction + fuzzy
 import yake
 from rapidfuzz import fuzz
-
-# vectorizers
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
-# Optional SBERT
+# Optional SBERT: app will fallback to TF-IDF if SBERT not available
 SBERT_AVAILABLE = False
 try:
     from sentence_transformers import SentenceTransformer, util
@@ -25,10 +19,9 @@ try:
 except Exception:
     SBERT_AVAILABLE = False
 
-# Page config
 st.set_page_config(page_title="RIGVEDIT — JD Resume Matcher", layout="wide")
 
-# Inject your CSS (from Style.css) so Streamlit looks like your original
+# ----- Strong dark theme CSS (matches your original) -----
 st.markdown("""
 <style>
 :root{
@@ -41,36 +34,36 @@ st.markdown("""
   --text:#e6eef6;
   --surface:#08111a;
 }
-body { background: linear-gradient(180deg,#061023 0%, #071427 100%); color:var(--text); }
-.big-title{ font-size:34px; font-weight:700; margin-bottom:6px; color:var(--text); }
-.muted { color: var(--muted); margin-bottom:18px; display:block; }
-.card{ background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01)); border: 1px solid rgba(255,255,255,0.03); padding:20px; border-radius:12px; box-shadow: 0 6px 30px rgba(2,6,23,0.6); margin-bottom:20px; }
+[data-testid="stAppViewContainer"] { background: linear-gradient(180deg,#061023 0%, #071427 100%) !important; color:var(--text) !important; }
+.big-title{ font-size:34px; font-weight:700; margin-bottom:6px; color:var(--text) !important; }
+.muted { color: var(--muted) !important; margin-bottom:18px; display:block; }
+.card{ background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01)) !important; border: 1px solid rgba(255,255,255,0.03) !important; padding:20px; border-radius:12px; box-shadow: 0 6px 30px rgba(2,6,23,0.6) !important; margin-bottom:20px; }
 .header{ display:flex; gap:14px; align-items:center; margin-bottom:20px; }
 .logo{ width:64px; height:64px; object-fit:contain; border-radius:10px; background:linear-gradient(135deg,var(--accent),var(--accent2)); padding:8px; box-shadow: 0 6px 20px rgba(0,0,0,0.5); }
-.result-table th, .result-table td{ color:var(--text); }
-.download-btn { background: linear-gradient(90deg,#06d3a0,#0ea6ff); color:#08111a; border-radius:10px; padding:8px 12px; text-decoration:none; }
+.big-card { padding:28px; border-radius:14px; }
+.result-table th, .result-table td{ color:var(--text) !important; border-color: rgba(255,255,255,0.03) !important; }
+.stDownloadButton>button { background: linear-gradient(90deg,#06d3a0,#0ea6ff) !important; color:#08111a !important; border-radius:10px !important; }
+.plotly-graph-div { background: transparent !important; }
 </style>
 """, unsafe_allow_html=True)
 
-# Header with logo (logo path: assets/images/logo.png)
-logo_path = "assets/images/logo.png"
-colL, colR = st.columns([1,9])
-with colL:
-    if Path(logo_path).exists():
-        st.image(logo_path, width=72)
+# ----- Header with logo + title -----
+logo_path = Path("assets/images/logo.png")
+col_logo, col_title = st.columns([0.8, 8])
+with col_logo:
+    if logo_path.exists():
+        st.image(str(logo_path), width=64)
     else:
-        # try raw GitHub URL (public repo)
         try:
-            st.image("https://raw.githubusercontent.com/Aditypitty/RIGVED-IT_JD-Resume-Matcher/main/assets/images/logo.png", width=72)
+            st.image("https://raw.githubusercontent.com/Aditypitty/RIGVED-IT_JD-Resume-Matcher/main/assets/images/logo.png", width=64)
         except:
             pass
-with colR:
+with col_title:
     st.markdown('<div class="big-title">RIGVEDIT — JD ⇄ Resume Matcher</div>', unsafe_allow_html=True)
     st.markdown('<div class="muted">Upload a job description and multiple resumes. The app will rank candidates and show breakdowns (Skill / Experience / Education / Semantic).</div>', unsafe_allow_html=True)
 
-# layout
-left, right = st.columns([2.5,1])
-
+# ---------- Upload UI (left) and match button (right simplified) ----------
+left, right = st.columns([2.5, 0.9])
 with left:
     st.markdown('<div class="card">', unsafe_allow_html=True)
     st.subheader("Upload Job Description & Resumes")
@@ -81,32 +74,35 @@ with left:
 with right:
     st.markdown('<div class="card">', unsafe_allow_html=True)
     st.subheader("Controls")
-    topk = st.number_input("Top candidates to show", min_value=1, max_value=20, value=5)
+    # Fixed topk to 3 (no control shown)
+    st.markdown("**Top performers shown:** 3", unsafe_allow_html=True)
     run_btn = st.button("Match & Rank")
     st.markdown("</div>", unsafe_allow_html=True)
 
-# ---------- Helpers (adapted from your Flask code) ----------
+TOPK = 3  # fixed value as requested
+
+# ---------- Helpers ----------
 def extract_text_pdf_bytes(b: bytes) -> str:
-    text = ""
+    txt = ""
     try:
         with pdfplumber.open(io.BytesIO(b)) as pdf:
             for p in pdf.pages:
-                txt = p.extract_text()
-                if txt:
-                    text += " " + txt
+                t = p.extract_text()
+                if t:
+                    txt += " " + t
     except Exception:
-        text = ""
-    return text or ""
+        txt = ""
+    return txt or ""
 
 def extract_text_docx_bytes(b: bytes) -> str:
-    text = ""
+    txt = ""
     try:
         doc = docx.Document(io.BytesIO(b))
         for p in doc.paragraphs:
-            text += " " + p.text
+            txt += " " + p.text
     except Exception:
-        text = ""
-    return text or ""
+        txt = ""
+    return txt or ""
 
 def clean_text(t: str) -> str:
     if not t:
@@ -115,7 +111,6 @@ def clean_text(t: str) -> str:
     t = re.sub(r'\s+',' ', t)
     return t.strip()
 
-# skills extraction (YAKE + noun chunks via yake only to mimic)
 def extract_skills_from_jd(jd_text: str, topk: int = 40):
     if not jd_text:
         return []
@@ -129,42 +124,33 @@ def extract_skills_from_jd(jd_text: str, topk: int = 40):
             skills.append(s)
     return skills
 
-# experience & education (use your functions)
-COMMON_DEGREES = ['bachelor','b.tech','b.e','b.sc','b.com','bca','m.tech','m.sc','mca','mba','master','phd','doctor']
-
 def extract_experience_years(text: str) -> int:
     if not text:
         return 0
-    matches = re.findall(r"(\d{1,2})\s*(?:\+)?\s*(?:years|yrs|yrs\.|year)\b", text.lower())
+    matches = re.findall(r"(\d{1,2})\s*(?:\+)?\s*(?:years|yrs|year)\b", text.lower())
     if matches:
         years = max(int(m) for m in matches)
         return years
-    m = re.search(r"experience[:\s]+(\d{1,2})", text.lower())
-    if m:
+    yrs = re.findall(r'((?:19|20)\d{2})', text)
+    if len(yrs) >= 2:
         try:
-            return int(m.group(1))
-        except:
-            pass
-    years = re.findall(r'((?:19|20)\d{2})', text)
-    if len(years) >= 2:
-        try:
-            return abs(int(years[-1]) - int(years[0]))
+            return abs(int(yrs[-1]) - int(yrs[0]))
         except:
             pass
     return 0
 
 def education_score(text: str) -> int:
-    t = text.lower()
+    t = (text or "").lower()
     t = re.sub(r'\.', ' ', t)
     t = re.sub(r'[,;:/\\-]', ' ', t)
     t = re.sub(r'\s+', ' ', t).strip()
     if re.search(r'\b(phd|doctorate)\b', t):
         return 100
-    if re.search(r'\b(m\s*sc|msc|mca|m\s*tech|mtech|ms\b|master|mba)\b', t):
-        if re.search(r'\b(pursuing|pursue|ongoing|currently pursuing)\b', t):
+    if re.search(r'\b(m\s*sc|msc|mca|m\s*tech|mtech|master|mba)\b', t):
+        if re.search(r'\b(pursuing|ongoing|currently pursuing)\b', t):
             return 75
         return 85
-    if re.search(r'\b(b\s*tech|btech|b\s*e|be\b|beng\b|bachelor|b\s*sc|bsc|bca)\b', t):
+    if re.search(r'\b(b\s*tech|btech|b\s*e|be\b|bachelor|b\s*sc|bsc|bca)\b', t):
         return 70
     if re.search(r'\b(diploma|polytechnic|iti)\b', t):
         return 55
@@ -174,11 +160,10 @@ def education_score(text: str) -> int:
         return 30
     return 0
 
-# semantic scoring: try SBERT if available, else TF-IDF fallback
 def compute_semantic_scores(jd_text: str, resume_texts: list):
     if not resume_texts:
         return [], []
-    # SBERT path
+    # SBERT if available (may take long)
     if SBERT_AVAILABLE:
         try:
             model = SentenceTransformer("sentence-transformers/all-mpnet-base-v2")
@@ -197,9 +182,7 @@ def compute_semantic_scores(jd_text: str, resume_texts: list):
     vect = TfidfVectorizer(stop_words='english', max_features=3000)
     try:
         X = vect.fit_transform([jd_text] + resume_texts)
-        jd_vec = X[0]
-        res_vecs = X[1:]
-        cos = cosine_similarity(jd_vec, res_vecs)[0]
+        cos = cosine_similarity(X[0], X[1:])[0]
         minv, maxv = float(cos.min()), float(cos.max())
         if maxv - minv <= 1e-9:
             norm = np.zeros_like(cos)
@@ -225,7 +208,6 @@ if run_btn:
         st.error("Please upload at least one resume.")
     else:
         with st.spinner("Processing files..."):
-            # extract JD text
             jd_bytes = jd_file.read()
             if jd_file.name.lower().endswith(".pdf"):
                 jd_raw = extract_text_pdf_bytes(jd_bytes)
@@ -237,8 +219,6 @@ if run_btn:
                 except:
                     jd_raw = ""
             jd_text = clean_text(jd_raw)
-
-            # extract skills
             skills = extract_skills_from_jd(jd_text, topk=40)
 
             candidate_texts = []
@@ -259,7 +239,6 @@ if run_btn:
                 txt_clean = clean_text(txt)
                 candidate_texts.append(txt_clean)
 
-                # skill coverage: substring check against extracted skills
                 found = [s for s in skills if s and s in txt_clean]
                 coverage = int(round((len(found)/max(len(skills),1))*100))
                 years = extract_experience_years(txt_clean)
@@ -272,10 +251,8 @@ if run_btn:
                     "Education": edu
                 })
 
-            # semantic
             semantic_norm, semantic_raw = compute_semantic_scores(jd_text, candidate_texts)
 
-            # finalize rows
             for i, row in enumerate(data):
                 spct = int(semantic_norm[i]) if semantic_norm else 0
                 row["Semantic_pct"] = spct
@@ -287,21 +264,20 @@ if run_btn:
 
             df = pd.DataFrame(data).sort_values(by="Match_Score", ascending=False).reset_index(drop=True)
 
-        # show results in card (table left, chart right)
-        st.markdown('<div class="card">', unsafe_allow_html=True)
+        # Show results card (dark)
+        st.markdown('<div class="card big-card">', unsafe_allow_html=True)
         cols = st.columns([2,1])
         with cols[0]:
             st.subheader("Top Candidates")
-            # show table similar to your HTML table
             display_df = df[["Resume","Skill_Coverage_str","Experience","Education","Semantic_str","Match_Score"]].copy()
             display_df.columns = ["Resume","Skill Coverage","Experience (yrs)","Education","Semantic","Match Score"]
-            st.table(display_df.head(topk).replace({np.nan:""}))
-            # download CSV
+            # show top 3 only
+            st.table(display_df.head(TOPK).replace({np.nan:""}))
             csv = df[["Resume","Skill_Coverage","Experience","Education","Semantic_pct","Match_Score"]].to_csv(index=False).encode('utf-8')
             st.download_button("Download CSV", data=csv, file_name="ranking.csv", mime="text/csv")
         with cols[1]:
             st.subheader("Top 3 Match Scores")
-            top3 = df.head(3)
+            top3 = df.head(TOPK)
             if not top3.empty:
                 import plotly.graph_objects as go
                 fig = go.Figure(go.Bar(
@@ -315,4 +291,4 @@ if run_btn:
                 fig.update_layout(template='plotly_dark', xaxis=dict(range=[0,100], tick0=0), margin=dict(l=10,r=10,t=10,b=10), height=360)
                 st.plotly_chart(fig, use_container_width=True)
         st.markdown('</div>', unsafe_allow_html=True)
-        st.success("Done — scroll to see results above.")
+        st.success("Done — results shown above.")
