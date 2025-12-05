@@ -1,3 +1,6 @@
 streamlit>=1.20
-gradio>=3.0
-rapidfuzz>=2.0.0
+pdfplumber
+python-docx
+pandas
+scikit-learn
+rapidfuzz
