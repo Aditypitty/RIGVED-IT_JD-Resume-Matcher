@@ -4,4 +4,7 @@ python-docx
 pandas
 scikit-learn
 rapidfuzz
+yake
 plotly
+sentence-transformers
+torch

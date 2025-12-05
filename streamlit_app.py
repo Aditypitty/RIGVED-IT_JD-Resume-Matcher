@@ -1,38 +1,74 @@
 # streamlit_app.py
 import streamlit as st
-import pdfplumber
-import docx
-import re
-import io
+import io, os, re, tempfile
+from pathlib import Path
 import pandas as pd
 import numpy as np
+
+# text extraction
+import pdfplumber
+import docx
+
+# keyword extraction + fuzzy
+import yake
+from rapidfuzz import fuzz
+
+# vectorizers
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
-from rapidfuzz import fuzz
-import plotly.graph_objects as go
 
-st.set_page_config(page_title="RIGVEDIT — JD Resume Matcher", layout="wide", initial_sidebar_state="auto")
+# Optional SBERT
+SBERT_AVAILABLE = False
+try:
+    from sentence_transformers import SentenceTransformer, util
+    SBERT_AVAILABLE = True
+except Exception:
+    SBERT_AVAILABLE = False
 
-# ---- Styling to mimic the dark, card-style UI ----
-st.markdown(
-    """
-    <style>
-    :root { --bg: #061022; --card:#081826; --muted:#9fb0c5; --accent:#00c2a8; --text:#e6eef6; }
-    .stApp { background: linear-gradient(180deg,#061022,#07182a); color: var(--text); }
-    .card { background: var(--card); padding: 24px; border-radius: 14px; box-shadow: 0 10px 30px rgba(0,0,0,0.6); }
-    .big-title { font-size:34px; font-weight:700; color:var(--text); margin-bottom:6px; }
-    .muted { color: var(--muted); font-size:14px; margin-bottom:18px; }
-    .download-btn { background: linear-gradient(90deg,#06d3a0,#0ea6ff); color:#fff; padding:10px 18px; border-radius:10px; text-decoration:none; }
-    .table-header { color: #bcd3e0; font-weight:600; }
-    </style>
-    """,
-    unsafe_allow_html=True
-)
+# Page config
+st.set_page_config(page_title="RIGVEDIT — JD Resume Matcher", layout="wide")
 
-st.markdown('<div class="big-title">RIGVEDIT — JD ⇄ Resume Matcher</div>', unsafe_allow_html=True)
-st.markdown('<div class="muted">Upload a job description and multiple resumes. The app will rank candidates and show breakdowns (Skill / Experience / Education / Semantic).</div>', unsafe_allow_html=True)
+# Inject your CSS (from Style.css) so Streamlit looks like your original
+st.markdown("""
+<style>
+:root{
+  --bg:#0f1724;
+  --card:#0b1220;
+  --muted:#9aa6b2;
+  --accent:#00b894;
+  --accent2:#0984e3;
+  --glass: rgba(255,255,255,0.03);
+  --text:#e6eef6;
+  --surface:#08111a;
+}
+body { background: linear-gradient(180deg,#061023 0%, #071427 100%); color:var(--text); }
+.big-title{ font-size:34px; font-weight:700; margin-bottom:6px; color:var(--text); }
+.muted { color: var(--muted); margin-bottom:18px; display:block; }
+.card{ background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01)); border: 1px solid rgba(255,255,255,0.03); padding:20px; border-radius:12px; box-shadow: 0 6px 30px rgba(2,6,23,0.6); margin-bottom:20px; }
+.header{ display:flex; gap:14px; align-items:center; margin-bottom:20px; }
+.logo{ width:64px; height:64px; object-fit:contain; border-radius:10px; background:linear-gradient(135deg,var(--accent),var(--accent2)); padding:8px; box-shadow: 0 6px 20px rgba(0,0,0,0.5); }
+.result-table th, .result-table td{ color:var(--text); }
+.download-btn { background: linear-gradient(90deg,#06d3a0,#0ea6ff); color:#08111a; border-radius:10px; padding:8px 12px; text-decoration:none; }
+</style>
+""", unsafe_allow_html=True)
 
-# Layout: left = inputs + results table, right = controls + chart
+# Header with logo (logo path: assets/images/logo.png)
+logo_path = "assets/images/logo.png"
+colL, colR = st.columns([1,9])
+with colL:
+    if Path(logo_path).exists():
+        st.image(logo_path, width=72)
+    else:
+        # try raw GitHub URL (public repo)
+        try:
+            st.image("https://raw.githubusercontent.com/Aditypitty/RIGVED-IT_JD-Resume-Matcher/main/assets/images/logo.png", width=72)
+        except:
+            pass
+with colR:
+    st.markdown('<div class="big-title">RIGVEDIT — JD ⇄ Resume Matcher</div>', unsafe_allow_html=True)
+    st.markdown('<div class="muted">Upload a job description and multiple resumes. The app will rank candidates and show breakdowns (Skill / Experience / Education / Semantic).</div>', unsafe_allow_html=True)
+
+# layout
 left, right = st.columns([2.5,1])
 
 with left:
@@ -40,11 +76,7 @@ with left:
     st.subheader("Upload Job Description & Resumes")
     jd_file = st.file_uploader("Job Description (PDF / DOCX / TXT)", type=['pdf','docx','txt'])
     resumes = st.file_uploader("Resumes (PDF / DOCX / TXT) — multiple", type=['pdf','docx','txt'], accept_multiple_files=True)
-    st.markdown("<hr style='border:0.5px solid rgba(255,255,255,0.04)'/>", unsafe_allow_html=True)
-
-    # placeholder for results table (rendered after matching)
-    results_placeholder = st.empty()
-    st.markdown('</div>', unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
 
 with right:
     st.markdown('<div class="card">', unsafe_allow_html=True)
@@ -53,56 +85,67 @@ with right:
     run_btn = st.button("Match & Rank")
     st.markdown("</div>", unsafe_allow_html=True)
 
-# --- helper functions for text extraction and scoring ---
-def extract_text_from_pdf(file_bytes):
+# ---------- Helpers (adapted from your Flask code) ----------
+def extract_text_pdf_bytes(b: bytes) -> str:
     text = ""
     try:
-        with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+        with pdfplumber.open(io.BytesIO(b)) as pdf:
             for p in pdf.pages:
-                page_text = p.extract_text()
-                if page_text:
-                    text += page_text + "\n"
+                txt = p.extract_text()
+                if txt:
+                    text += " " + txt
     except Exception:
         text = ""
-    return text
+    return text or ""
 
-def extract_text_from_docx(file_bytes):
+def extract_text_docx_bytes(b: bytes) -> str:
     text = ""
     try:
-        doc = docx.Document(io.BytesIO(file_bytes))
-        for para in doc.paragraphs:
-            text += para.text + "\n"
+        doc = docx.Document(io.BytesIO(b))
+        for p in doc.paragraphs:
+            text += " " + p.text
     except Exception:
         text = ""
-    return text
+    return text or ""
 
-def file_to_text(uploaded_file):
-    if uploaded_file is None:
+def clean_text(t: str) -> str:
+    if not t:
         return ""
-    name = uploaded_file.name.lower()
-    b = uploaded_file.read()
-    if name.endswith(".pdf"):
-        return extract_text_from_pdf(b)
-    if name.endswith(".docx"):
-        return extract_text_from_docx(b)
-    try:
-        return b.decode('utf-8', errors='ignore')
-    except:
-        return str(b)
+    t = t.replace("\n"," ").replace("\r"," ")
+    t = re.sub(r'\s+',' ', t)
+    return t.strip()
 
+# skills extraction (YAKE + noun chunks via yake only to mimic)
+def extract_skills_from_jd(jd_text: str, topk: int = 40):
+    if not jd_text:
+        return []
+    kw = yake.KeywordExtractor(top=topk, stopwords=None)
+    yake_res = kw.extract_keywords(jd_text)
+    yake_kw = [k for k, s in yake_res]
+    skills = []
+    for s in yake_kw:
+        s = s.lower().strip()
+        if s and s not in skills:
+            skills.append(s)
+    return skills
+
+# experience & education (use your functions)
 COMMON_DEGREES = ['bachelor','b.tech','b.e','b.sc','b.com','bca','m.tech','m.sc','mca','mba','master','phd','doctor']
 
-def extract_experience_years(text):
-    text_l = text.lower()
-    # direct pattern: "5 years", "5+ years", "5 yrs"
-    m = re.search(r'(\d{1,2})\+?\s*(?:years|yrs|year)\b', text_l)
+def extract_experience_years(text: str) -> int:
+    if not text:
+        return 0
+    matches = re.findall(r"(\d{1,2})\s*(?:\+)?\s*(?:years|yrs|yrs\.|year)\b", text.lower())
+    if matches:
+        years = max(int(m) for m in matches)
+        return years
+    m = re.search(r"experience[:\s]+(\d{1,2})", text.lower())
     if m:
         try:
             return int(m.group(1))
         except:
             pass
-    # years range heuristic e.g., 2015 - 2020
-    years = re.findall(r'((?:19|20)\d{2})', text_l)
+    years = re.findall(r'((?:19|20)\d{2})', text)
     if len(years) >= 2:
         try:
             return abs(int(years[-1]) - int(years[0]))
@@ -110,112 +153,166 @@ def extract_experience_years(text):
             pass
     return 0
 
-def education_score(text):
+def education_score(text: str) -> int:
     t = text.lower()
-    score = 0
-    for d in COMMON_DEGREES:
-        if d in t:
-            score = 70
-            break
-    if 'master' in t or 'm.tech' in t or 'mba' in t or 'm.sc' in t or 'mca' in t:
-        score = max(score, 90)
-    if 'phd' in t or 'doctor' in t:
-        score = 100
-    return int(score)
+    t = re.sub(r'\.', ' ', t)
+    t = re.sub(r'[,;:/\\-]', ' ', t)
+    t = re.sub(r'\s+', ' ', t).strip()
+    if re.search(r'\b(phd|doctorate)\b', t):
+        return 100
+    if re.search(r'\b(m\s*sc|msc|mca|m\s*tech|mtech|ms\b|master|mba)\b', t):
+        if re.search(r'\b(pursuing|pursue|ongoing|currently pursuing)\b', t):
+            return 75
+        return 85
+    if re.search(r'\b(b\s*tech|btech|b\s*e|be\b|beng\b|bachelor|b\s*sc|bsc|bca)\b', t):
+        return 70
+    if re.search(r'\b(diploma|polytechnic|iti)\b', t):
+        return 55
+    if re.search(r'\b(12th|hsc|higher secondary)\b', t):
+        return 40
+    if re.search(r'\b(10th|ssc|secondary school)\b', t):
+        return 30
+    return 0
 
-def skill_coverage_score(jd_text, resume_text):
-    # rapidfuzz token_set_ratio (0-100)
+# semantic scoring: try SBERT if available, else TF-IDF fallback
+def compute_semantic_scores(jd_text: str, resume_texts: list):
+    if not resume_texts:
+        return [], []
+    # SBERT path
+    if SBERT_AVAILABLE:
+        try:
+            model = SentenceTransformer("sentence-transformers/all-mpnet-base-v2")
+            jd_emb = model.encode(jd_text, convert_to_tensor=True)
+            res_embs = model.encode(resume_texts, convert_to_tensor=True)
+            cos = util.cos_sim(jd_emb, res_embs).cpu().numpy()[0]
+            minv, maxv = float(cos.min()), float(cos.max())
+            if maxv - minv <= 1e-9:
+                norm = np.zeros_like(cos)
+            else:
+                norm = 100.0 * (cos - minv) / (maxv - minv)
+            return norm.astype(int).tolist(), cos.tolist()
+        except Exception:
+            pass
+    # TF-IDF fallback
+    vect = TfidfVectorizer(stop_words='english', max_features=3000)
     try:
-        return int(fuzz.token_set_ratio(jd_text, resume_text))
-    except:
-        return 0
+        X = vect.fit_transform([jd_text] + resume_texts)
+        jd_vec = X[0]
+        res_vecs = X[1:]
+        cos = cosine_similarity(jd_vec, res_vecs)[0]
+        minv, maxv = float(cos.min()), float(cos.max())
+        if maxv - minv <= 1e-9:
+            norm = np.zeros_like(cos)
+        else:
+            norm = 100.0 * (cos - minv) / (maxv - minv)
+        return norm.astype(int).tolist(), cos.tolist()
+    except Exception:
+        return [0]*len(resume_texts), [0.0]*len(resume_texts)
 
-def semantic_similarity_score(jd_text, resume_text, vect=None):
-    if not jd_text.strip() or not resume_text.strip():
-        return 0.0
-    docs = [jd_text, resume_text]
-    if vect is None:
-        vect = TfidfVectorizer(stop_words='english', max_features=2000)
-        X = vect.fit_transform(docs)
-    else:
-        X = vect.transform(docs)
-    score = cosine_similarity(X[0], X[1])[0][0]
-    return float(score) * 100.0
+def compute_final_score(skill_cov_pct:int, semantic_pct:int, exp_years:int, edu_score_val:int):
+    exp_contrib = min(exp_years, 10) / 10.0 * 10.0
+    edu_contrib = (edu_score_val / 100.0) * 10.0
+    weighted = (semantic_pct * 0.55) + (skill_cov_pct * 0.25) + exp_contrib + edu_contrib
+    if weighted > 100:
+        weighted = 100
+    return int(round(weighted))
 
-# run matching when button pressed
+# ---------- Run matching ----------
 if run_btn:
     if not jd_file:
         st.error("Please upload a Job Description file.")
     elif not resumes:
-        st.error("Please upload at least one resume file.")
+        st.error("Please upload at least one resume.")
     else:
-        with st.spinner("Processing and scoring resumes..."):
-            jd_text = file_to_text(jd_file)
+        with st.spinner("Processing files..."):
+            # extract JD text
+            jd_bytes = jd_file.read()
+            if jd_file.name.lower().endswith(".pdf"):
+                jd_raw = extract_text_pdf_bytes(jd_bytes)
+            elif jd_file.name.lower().endswith(".docx"):
+                jd_raw = extract_text_docx_bytes(jd_bytes)
+            else:
+                try:
+                    jd_raw = jd_bytes.decode('utf-8', errors='ignore')
+                except:
+                    jd_raw = ""
+            jd_text = clean_text(jd_raw)
+
+            # extract skills
+            skills = extract_skills_from_jd(jd_text, topk=40)
+
             candidate_texts = []
-            candidate_names = []
+            names = []
+            data = []
             for f in resumes:
-                txt = file_to_text(f)
-                candidate_texts.append(txt)
-                candidate_names.append(f.name)
+                names.append(f.name)
+                fb = f.read()
+                if f.name.lower().endswith(".pdf"):
+                    txt = extract_text_pdf_bytes(fb)
+                elif f.name.lower().endswith(".docx"):
+                    txt = extract_text_docx_bytes(fb)
+                else:
+                    try:
+                        txt = fb.decode('utf-8', errors='ignore')
+                    except:
+                        txt = ""
+                txt_clean = clean_text(txt)
+                candidate_texts.append(txt_clean)
 
-            # pre-fit vectorizer on JD + resumes for semantic similarity
-            vect = TfidfVectorizer(stop_words='english', max_features=3000)
-            try:
-                vect.fit([jd_text] + candidate_texts)
-            except:
-                pass
-
-            rows = []
-            for name, text in zip(candidate_names, candidate_texts):
-                skill = skill_coverage_score(jd_text, text)  # 0-100
-                exp = extract_experience_years(text)
-                edu = education_score(text)  # 0-100-ish
-                sem = round(semantic_similarity_score(jd_text, text, vect=vect), 2)
-                # match score: tune weights to match your original model visuals
-                match_score = round(0.45 * skill + 0.15 * min(exp * 5, 20) + 0.2 * edu + 0.2 * sem, 2)
-                rows.append({
-                    "Resume": name,
-                    "Skill Coverage": f"{int(skill)}%",
-                    "Experience (yrs)": int(exp),
-                    "Education": int(edu),
-                    "Semantic": f"{int(sem)}%",
-                    "Match Score": match_score
+                # skill coverage: substring check against extracted skills
+                found = [s for s in skills if s and s in txt_clean]
+                coverage = int(round((len(found)/max(len(skills),1))*100))
+                years = extract_experience_years(txt_clean)
+                edu = education_score(txt_clean)
+                data.append({
+                    "Resume": f.name,
+                    "Text": txt_clean,
+                    "Skill_Coverage": coverage,
+                    "Experience": years,
+                    "Education": edu
                 })
 
-            df = pd.DataFrame(rows).sort_values("Match Score", ascending=False).reset_index(drop=True)
+            # semantic
+            semantic_norm, semantic_raw = compute_semantic_scores(jd_text, candidate_texts)
 
-        # render the richer UI (table + chart + download)
-        results_placeholder.empty()
+            # finalize rows
+            for i, row in enumerate(data):
+                spct = int(semantic_norm[i]) if semantic_norm else 0
+                row["Semantic_pct"] = spct
+                row["Semantic_raw"] = float(semantic_raw[i]) if semantic_raw else 0.0
+                row["Match_Score"] = compute_final_score(row["Skill_Coverage"], spct, row["Experience"], row["Education"])
+                row["Skill_Coverage_str"] = f"{row['Skill_Coverage']}%"
+                row["Semantic_str"] = f"{row['Semantic_pct']}%"
+                row["Match_Score_str"] = f"{row['Match_Score']}%"
+
+            df = pd.DataFrame(data).sort_values(by="Match_Score", ascending=False).reset_index(drop=True)
+
+        # show results in card (table left, chart right)
         st.markdown('<div class="card">', unsafe_allow_html=True)
-        cols = st.columns([2.2,1])
+        cols = st.columns([2,1])
         with cols[0]:
             st.subheader("Top Candidates")
-            # use st.dataframe for scrollable table
-            styled = df.head(topk)
-            st.dataframe(styled, use_container_width=True, height=360)
-            csv = df.to_csv(index=False).encode('utf-8')
-            st.download_button("Download CSV", data=csv, file_name="match_results.csv", mime="text/csv")
+            # show table similar to your HTML table
+            display_df = df[["Resume","Skill_Coverage_str","Experience","Education","Semantic_str","Match_Score"]].copy()
+            display_df.columns = ["Resume","Skill Coverage","Experience (yrs)","Education","Semantic","Match Score"]
+            st.table(display_df.head(topk).replace({np.nan:""}))
+            # download CSV
+            csv = df[["Resume","Skill_Coverage","Experience","Education","Semantic_pct","Match_Score"]].to_csv(index=False).encode('utf-8')
+            st.download_button("Download CSV", data=csv, file_name="ranking.csv", mime="text/csv")
         with cols[1]:
             st.subheader("Top 3 Match Scores")
             top3 = df.head(3)
             if not top3.empty:
-                # Plotly horizontal bars with nicer colors and rounded style
-                fig = go.Figure()
-                colors = ['#ff6b8a', '#3da7ff', '#ffcc56']
-                fig.add_trace(go.Bar(
-                    y=top3['Resume'],
-                    x=top3['Match Score'],
+                import plotly.graph_objects as go
+                fig = go.Figure(go.Bar(
+                    x=top3["Match_Score"],
+                    y=top3["Resume"],
                     orientation='h',
-                    marker=dict(color=colors[:len(top3)], line=dict(color='rgba(0,0,0,0.2)', width=0)),
-                    text=top3['Match Score'],
+                    marker=dict(color=['rgba(255,99,132,0.95)','rgba(54,162,235,0.95)','rgba(255,205,86,0.95)']),
+                    text=top3["Match_Score"],
                     textposition='inside'
                 ))
-                fig.update_layout(
-                    xaxis=dict(range=[0, max(100, top3['Match Score'].max()*1.1)]),
-                    template='plotly_dark',
-                    margin=dict(l=10, r=10, t=10, b=10),
-                    height=360,
-                )
+                fig.update_layout(template='plotly_dark', xaxis=dict(range=[0,100], tick0=0), margin=dict(l=10,r=10,t=10,b=10), height=360)
                 st.plotly_chart(fig, use_container_width=True)
         st.markdown('</div>', unsafe_allow_html=True)
         st.success("Done — scroll to see results above.")
