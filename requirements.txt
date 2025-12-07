@@ -1,10 +1,12 @@
-streamlit>=1.20
+streamlit==1.30.0
+pandas
+numpy
 pdfplumber
 python-docx
-pandas
-scikit-learn
-rapidfuzz
 yake
-plotly
+spacy==3.7.2
+en-core-web-sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.0/en_core_web_sm-3.7.0-py3-none-any.whl
 sentence-transformers
-torch
+scikit-learn
+plotly
+rapidfuzz
