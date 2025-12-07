@@ -1,4 +1,3 @@
-# streamlit_app.py
 """
 RIGVEDIT — JD <> Resume Matcher (Streamlit)
 Drop-in replacement implementing:
@@ -53,6 +52,7 @@ except Exception:
 st.set_page_config(page_title="RIGVEDIT — JD Resume Matcher", layout="wide")
 
 # Inject CSS to ensure labels/browse text are visible on dark background.
+# --- NOTE: we add general fallback selectors plus a few explicit overrides ---
 st.markdown(
     """
     <style>
@@ -74,6 +74,55 @@ st.markdown(
     .download-csv-btn { background: linear-gradient(90deg,#14d3a5,#1ea7ff); color:#08111a; padding:10px 16px; border-radius:12px; font-weight:700; text-decoration:none; display:inline-block; }
     /* Card container look */
     .card { background: linear-gradient(180deg, rgba(255,255,255,0.01), rgba(255,255,255,0.01)); border-radius:14px; padding:18px; box-shadow: 0 10px 30px rgba(2,6,23,0.6); }
+
+    /* -------------------------
+       NEW: Fixes for visibility on dark background
+       (uploader labels, pagination text, generated labels etc.)
+       ------------------------- */
+
+    /* Broad selectors to catch Streamlit text nodes */
+    label, span, p, div, small {
+        color: #dbe9f5 !important;
+    }
+
+    /* Streamlit auto-generated markdown/labels */
+    .stMarkdown, .stText, [data-testid="stText"] {
+        color: #dbe9f5 !important;
+    }
+
+    /* File uploader specific */
+    [data-testid="stFileUploader"] > div, [data-testid="stFileUploader"] label, [data-testid="stFileUploader"] span {
+        color: #dbe9f5 !important;
+    }
+
+    /* File uploader button text */
+    [data-testid="stFileUploadButton"] button, [data-testid="stFileUploadButton"] label {
+        color: #08111a !important;
+    }
+
+    /* Pagination / page counter ("Showing page 1 of 2") — common wrappers */
+    .stApp .css-*, .stApp .st-b7, .stApp .st- bm {
+        color: #dbe9f5 !important;
+    }
+
+    /* Explicit fallback for any faint gray elements */
+    .css-1lsmgbg, .css-1v3fvcr, .css-1d391kg, .css-1o8f7y6, .css-1cpxqw2 {
+        color: #dbe9f5 !important;
+    }
+
+    /* Ensure dataframes and plot labels remain visible */
+    .stDataFrame, .st-plotly, .streamlit-expanderHeader, .stPlotlyChart {
+        color: #dbe9f5 !important;
+    }
+
+    /* Keep small helper text readable but slightly dimmer */
+    .stTextSmall, small {
+        color: #cfe7ff !important;
+        opacity: 0.95;
+    }
+
+    /* --- End visibility fixes --- */
+
     </style>
     """,
     unsafe_allow_html=True,
@@ -122,15 +171,27 @@ def clean_text(t: str) -> str:
 # -------------------------
 # Skill extraction (YAKE + noun chunks)
 # -------------------------
-nlp = spacy.load("en_core_web_sm", disable=["ner"])
+# load spacy model safely (existing behavior)
+nlp = None
+try:
+    nlp = spacy.load("en_core_web_sm", disable=["ner"])
+except Exception:
+    # If model isn't available, nlp will remain None and code falls back to keywords only
+    nlp = None
 
 def extract_skills_from_jd(jd_text: str, topk: int = 40):
     if not jd_text:
         return []
     kw_extractor = yake.KeywordExtractor(top=topk, stopwords=None)
     kw = [k for k, score in kw_extractor.extract_keywords(jd_text)]
-    doc = nlp(jd_text)
-    noun_chunks = [c.text.lower().strip() for c in doc.noun_chunks if len(c.text) > 2]
+    noun_chunks = []
+    if nlp is not None:
+        doc = nlp(jd_text)
+        noun_chunks = [c.text.lower().strip() for c in doc.noun_chunks if len(c.text) > 2]
+    else:
+        # Lightweight fallback: split on punctuation and whitespace to derive candidates
+        candidates = re.split(r'[,\.;:\n\-()/]', jd_text.lower())
+        noun_chunks = [c.strip() for c in candidates if len(c.strip()) > 2][:topk]
     skills = []
     for s in kw + noun_chunks:
         s = s.lower().strip()
@@ -256,9 +317,17 @@ logo_path = Path("assets/images/logo.png")
 col1, col2 = st.columns([1, 10])
 with col1:
     if logo_path.exists():
-        st.image(str(logo_path), width=72)
+        # Use HTML img tag to preserve aspect ratio and ensure proper sizing
+        st.markdown(
+            f"""
+            <div style="display:flex;align-items:center;">
+                <img src='{logo_path.as_posix()}' style='height:70px; width:auto; border-radius:12px;' />
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
     else:
-        st.markdown("<div style='width:72px;height:72px;border-radius:12px;background:#08111a;display:inline-block'></div>", unsafe_allow_html=True)
+        st.markdown("<div style='height:70px;width:70px;background:#08111a;border-radius:12px;'></div>", unsafe_allow_html=True)
 with col2:
     st.markdown("<div class='app-header'>"
                 "<div><h1 class='app-title'>RIGVEDIT — JD ⇄ Resume Matcher</h1>"
