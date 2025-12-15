@@ -144,20 +144,33 @@ def extract_skills_from_jd(jd_text: str, topk: int = 40):
 def extract_experience_years(text: str) -> int:
     if not text:
         return 0
-    matches = re.findall(r"(\d{1,2})\s*(?:\+)?\s*(?:years|yrs|yrs\.|year)\b", text.lower())
-    if matches:
-        try:
-            years = max(int(m) for m in matches)
-            return years
-        except Exception:
-            pass
-    m = re.search(r"experience[:\s]+(\d{1,2})", text.lower())
+
+    t = text.lower()
+
+    # 1️⃣ Match decimal years (e.g. 3.5 years)
+    m = re.search(r"(\d+(?:\.\d+)?)\s*(?:\+)?\s*(?:years|yrs|year)", t)
     if m:
-        try:
-            return int(m.group(1))
-        except Exception:
-            return 0
+        return int(float(m.group(1)))
+
+    # 2️⃣ Match "X years Y months"
+    m = re.search(r"(\d+)\s*years?\s*(\d+)\s*months?", t)
+    if m:
+        years = int(m.group(1))
+        months = int(m.group(2))
+        return years + (1 if months >= 6 else 0)
+
+    # 3️⃣ Match "Total Experience: X Years"
+    m = re.search(r"total\s+(?:year|years)\s+of\s+experience[:\s]*(\d+)", t)
+    if m:
+        return int(m.group(1))
+
+    # 4️⃣ Match "Experience: X Years"
+    m = re.search(r"experience[:\s]+(\d+)", t)
+    if m:
+        return int(m.group(1))
+
     return 0
+
 
 
 def education_score(text: str) -> int:
